@@ -23,21 +23,31 @@ class NamedSeq(nn.Module):
             x = mod(cx, x)
         return x
 
+def causal(cx, qk):
+    # qk : nhqk
+    [n, h, q, k] = qk.shape
+    mask = jnp.full([q,k], -float('inf'))
+    mask = jnp.triu(mask,1)
+    return qk + mask
+
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, d_model, n_head):
+    def __init__(self, d_model, n_head, attn_mask=None):
         super().__init__()
         self.n_head = n_head
         self.in_proj_weight = init.glorot_normal(d_model * 3, d_model)
         self.in_proj_bias = init.zeros(d_model * 3)
         self.out_proj = nn.Linear(d_model, d_model)
+        self.attn_mask = attn_mask
 
     def forward(self, cx, x):
         # x : n k c
         qkv = jnp.einsum('nkc,ic->nki', x, cx[self.in_proj_weight]) + cx[self.in_proj_bias]
         q, k, v = qkv.rearrange('n k (p h c) -> p n h k c', p=3, h=self.n_head)
-        qk = jnp.einsum('nhqc,nhkc->nhqk', q, k)
-        qk = jax.nn.softmax(qk / jnp.sqrt(q.shape[-1]), axis=-1)
+        qk = jnp.einsum('nhqc,nhkc->nhqk', q, k) / jnp.sqrt(q.shape[-1])
+        if self.attn_mask is not None:
+            qk = self.attn_mask(cx, qk)
+        qk = jax.nn.softmax(qk, axis=-1)
         out = jnp.einsum('nhqk,nhkc->nhqc', qk, v)
         out = out.rearrange('n h k c -> n k (h c)')
         out = self.out_proj(cx, out)
@@ -48,7 +58,7 @@ class ResidualAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask = None):
         super().__init__()
 
-        self.attn = MultiheadAttention(d_model, n_head)
+        self.attn = MultiheadAttention(d_model, n_head, attn_mask)
         self.ln_1 = nn.LayerNorm(d_model)
         self.mlp = NamedSeq([
             ("c_fc", nn.Linear(d_model, d_model * 4)),
@@ -56,7 +66,6 @@ class ResidualAttentionBlock(nn.Module):
             ("c_proj", nn.Linear(d_model * 4, d_model))
         ])
         self.ln_2 = nn.LayerNorm(d_model)
-        self.attn_mask = attn_mask
 
     def forward(self, cx, x):
         x = x + self.attn(cx, self.ln_1(cx, x))
@@ -73,6 +82,7 @@ class Transformer(nn.Module):
 
     def forward(self, cx, x):
         return self.resblocks(cx, x)
+
 
 class VisionTransformer(nn.Module):
     def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int):
@@ -105,3 +115,36 @@ class VisionTransformer(nn.Module):
             x = x @ cx[self.proj]
 
         return x
+
+class CLIPText(nn.Module):
+    def __init__(self, n_dim=512, n_layers=12, n_heads=8, d_out=512):
+        super().__init__()
+        self.transformer = Transformer(n_dim, n_layers, heads=n_heads, attn_mask=causal)
+        self.token_embedding = nn.Embedding(49408, n_dim)
+        self.ln_final = nn.LayerNorm(n_dim)
+        self.positional_embedding = init.normal(77, n_dim)
+        self.text_projection = init.normal(n_dim, d_out)
+        self.logit_scale = init.ones()
+
+    def encode_text(self, cx, text):
+        x = self.token_embedding(cx, text)  # [batch_size, n_ctx, d_model]
+
+        x = x + cx[self.positional_embedding]
+        x = self.transformer(cx, x)
+        x = self.ln_final(cx, x)
+
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        x = jax.vmap(lambda x, text: x[jnp.argmax(text)])(x,text) @ cx[self.text_projection]
+
+        return x
+
+class VITB32(CLIPText):
+    def __init__(self):
+        super().__init__(512, 12, 8, 512)
+        self.visual = VisionTransformer(224, 32, 768, 12, heads=12, output_dim=512)
+
+class VITL14(CLIPText):
+    def __init__(self):
+        super().__init__(768, 12, 768//64, 768)
+        self.visual = VisionTransformer(224, 14, 1024, 24, heads=1024//64, output_dim=768)
