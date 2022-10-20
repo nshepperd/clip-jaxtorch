@@ -116,6 +116,11 @@ class VisionTransformer(nn.Module):
 
         return x
 
+
+@jax.vmap
+def gather_bi(x, i):
+    return x[i]
+
 class CLIPText(nn.Module):
     def __init__(self, n_dim=512, n_layers=12, n_heads=8, d_out=512):
         super().__init__()
@@ -135,7 +140,7 @@ class CLIPText(nn.Module):
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = jax.vmap(lambda x, text: x[jnp.argmax(text)])(x,text) @ cx[self.text_projection]
+        x = gather_bi(x,jnp.argmax(text,axis=1)) @ cx[self.text_projection]
 
         return x
 
