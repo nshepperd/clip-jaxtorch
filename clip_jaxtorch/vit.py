@@ -34,6 +34,7 @@ def causal(cx, qk):
 class MultiheadAttention(nn.Module):
     def __init__(self, d_model, n_head, attn_mask=None):
         super().__init__()
+        self.d_model = d_model
         self.n_head = n_head
         self.in_proj_weight = init.glorot_normal(d_model * 3, d_model)
         self.in_proj_bias = init.zeros(d_model * 3)
@@ -149,7 +150,17 @@ class VITB32(CLIPText):
         super().__init__(512, 12, 8, 512)
         self.visual = VisionTransformer(224, 32, 768, 12, heads=12, output_dim=512)
 
+class VITB16(CLIPText):
+    def __init__(self):
+        super().__init__(512, 12, 8, 512)
+        self.visual = VisionTransformer(224, 16, 768, 12, heads=12, output_dim=512)
+
 class VITL14(CLIPText):
     def __init__(self):
         super().__init__(768, 12, 768//64, 768)
         self.visual = VisionTransformer(224, 14, 1024, 24, heads=1024//64, output_dim=768)
+
+class VITL14_336(CLIPText):
+    def __init__(self):
+        super().__init__(768, 12, 12, 768)
+        self.visual = VisionTransformer(336, 14, 1024, 24, heads=16, output_dim=768)

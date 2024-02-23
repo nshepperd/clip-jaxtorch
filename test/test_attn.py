@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from jax.tree_util import tree_map
 
-from clip_jax_simple import vit
+from clip_jaxtorch import vit
 
 import numpy.testing._private.utils as nputil
 
