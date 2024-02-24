@@ -5,6 +5,13 @@ from jaxtorch import nn, init
 import einops
 from collections import OrderedDict
 from functools import partial
+import math
+
+try:
+    from flash_attn_jax import flash_mha
+    use_flash_attention = True
+except ImportError:
+    use_flash_attention = False
 
 class QuickGELU(nn.Module):
     def forward(self, cx, x):
@@ -44,13 +51,18 @@ class MultiheadAttention(nn.Module):
     def forward(self, cx, x):
         # x : n k c
         qkv = jnp.einsum('nkc,ic->nki', x, cx[self.in_proj_weight]) + cx[self.in_proj_bias]
-        q, k, v = qkv.rearrange('n k (p h c) -> p n h k c', p=3, h=self.n_head)
-        qk = jnp.einsum('nhqc,nhkc->nhqk', q, k) / jnp.sqrt(q.shape[-1])
-        if self.attn_mask is not None:
-            qk = self.attn_mask(cx, qk)
-        qk = jax.nn.softmax(qk, axis=-1)
-        out = jnp.einsum('nhqk,nhkc->nhqc', qk, v)
-        out = out.rearrange('n h k c -> n k (h c)')
+        if use_flash_attention and x.dtype in [jnp.float16, jnp.bfloat16]:
+            q,k,v = qkv.rearrange('n k (p h c) -> p n k h c', p=3, h=self.n_head)
+            out = flash_mha(q,k,v, softmax_scale = 1 / math.sqrt(q.shape[-1]), is_causal = self.attn_mask=='causal')
+            out = out.rearrange('n k h c -> n k (h c)')
+        else:
+            q, k, v = qkv.rearrange('n k (p h c) -> p n h k c', p=3, h=self.n_head)
+            qk = jnp.einsum('nhqc,nhkc->nhqk', q, k) / jnp.sqrt(q.shape[-1])
+            if self.attn_mask == 'causal':
+                qk = causal(cx, qk)
+            qk = jax.nn.softmax(qk, axis=-1)
+            out = jnp.einsum('nhqk,nhkc->nhqc', qk, v)
+            out = out.rearrange('n h k c -> n k (h c)')
         out = self.out_proj(cx, out)
         return out
 
@@ -125,7 +137,7 @@ def gather_bi(x, i):
 class CLIPText(nn.Module):
     def __init__(self, n_dim=512, n_layers=12, n_heads=8, d_out=512):
         super().__init__()
-        self.transformer = Transformer(n_dim, n_layers, heads=n_heads, attn_mask=causal)
+        self.transformer = Transformer(n_dim, n_layers, heads=n_heads, attn_mask='causal')
         self.token_embedding = nn.Embedding(49408, n_dim)
         self.ln_final = nn.LayerNorm(n_dim)
         self.positional_embedding = init.normal(77, n_dim)
@@ -144,6 +156,9 @@ class CLIPText(nn.Module):
         x = gather_bi(x,jnp.argmax(text,axis=1)) @ cx[self.text_projection]
 
         return x
+
+    def encode_image(self, cx, image):
+        return self.visual(cx, image)
 
 class VITB32(CLIPText):
     def __init__(self):
